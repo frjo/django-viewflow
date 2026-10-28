@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Any, List, Optional
 
 from django.db import models
+from django.db.models.query_utils import DeferredAttribute
 
 from .base import DEFAULT, State, StateValue, TransitionNotAllowed
 from .typing import Condition, Permission
@@ -57,12 +58,26 @@ class _FSMFieldState(State):
         return self._field.attname
 
     def get(self, instance: object) -> Any:
-        if self.propname in instance.__dict__:
-            return instance.__dict__[self.propname]
-        return self._field.get_default()
+        # Read through the field's descriptor, so a deferred value is loaded
+        # from the database exactly like any other Django field.
+        return getattr(instance, self.propname)
 
     def set(self, instance: object, value: StateValue) -> None:
         instance.__dict__[self.propname] = value
+
+
+class FSMFieldDescriptor(DeferredAttribute):
+    """Django's own ``DeferredAttribute`` (deferred loading, parent-chain
+    lookup) plus the ``protected`` guard on direct assignment.
+    """
+
+    def __set__(self, instance: object, value: StateValue) -> None:
+        if self.field.protected and self.field.attname in instance.__dict__:
+            raise AttributeError(
+                f"Direct assignment to '{self.field.attname}' is not allowed;"
+                " use a transition method instead"
+            )
+        instance.__dict__[self.field.attname] = value
 
 
 class FSMField(models.CharField):
@@ -89,6 +104,8 @@ class FSMField(models.CharField):
     guarantees once ported code is running.
     """
 
+    descriptor_class = FSMFieldDescriptor
+
     def __init__(
         self,
         *args: Any,
@@ -100,25 +117,6 @@ class FSMField(models.CharField):
         self.enforce_initial = enforce_initial
         self._state = _FSMFieldState(self)
         super().__init__(*args, **kwargs)
-
-    def contribute_to_class(
-        self, cls: type, name: str, private_only: bool = False
-    ) -> None:
-        super().contribute_to_class(cls, name, private_only=private_only)
-        setattr(cls, self.attname, self)
-
-    def __get__(self, instance: Optional[object], owner: Optional[type] = None) -> Any:
-        if instance is None:
-            return self
-        return self._state.get(instance)
-
-    def __set__(self, instance: object, value: StateValue) -> None:
-        if self.protected and self.attname in instance.__dict__:
-            raise AttributeError(
-                f"Direct assignment to '{self.attname}' is not allowed;"
-                " use a transition method instead"
-            )
-        instance.__dict__[self.attname] = value
 
     def pre_save(self, model_instance: models.Model, add: bool) -> Any:
         value = super().pre_save(model_instance, add)

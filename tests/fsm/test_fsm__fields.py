@@ -1,6 +1,7 @@
 """Tests for the django-fsm-compatible viewflow.fsm.fields.FSMField."""
 
 from django.db import models, transaction
+from django.db.models.query_utils import DeferredAttribute
 from django.test import TestCase
 
 from viewflow.fsm import (
@@ -230,3 +231,37 @@ class TestDeconstruct(TestCase):
         name, path, args, kwargs = field.deconstruct()
         reconstructed_cls = import_string(path)
         self.assertIs(reconstructed_cls, FSMField)
+
+
+class TestDeferredLoading(TestCase):
+    def setUp(self):
+        job = Job.objects.create()
+        job.start()
+        job.save()
+        self.pk = job.pk
+
+    def test_deferred_field_loads_stored_value(self):
+        job = Job.objects.defer("status").get(pk=self.pk)
+        self.assertEqual(job.status, "running")
+
+    def test_only_loads_stored_value(self):
+        job = Job.objects.only("id").get(pk=self.pk)
+        self.assertEqual(job.status, "running")
+
+    def test_transition_on_deferred_instance_sees_stored_value(self):
+        job = Job.objects.defer("status").get(pk=self.pk)
+        job.finish()
+        self.assertEqual(job.status, "done")
+
+    def test_class_attribute_is_the_deferred_descriptor(self):
+        self.assertIsInstance(Job.status, DeferredAttribute)
+        self.assertIs(Job.status.field, Job._meta.get_field("status"))
+
+    def test_protected_deferred_field_loads_stored_value(self):
+        job = ProtectedJob.objects.create()
+        job.start()
+        job.save()
+        job = ProtectedJob.objects.defer("status").get(pk=job.pk)
+        self.assertEqual(job.status, "running")
+        with self.assertRaises(AttributeError):
+            job.status = "new"
